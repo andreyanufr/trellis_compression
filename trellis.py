@@ -158,12 +158,12 @@ def viterbi_path(prior, transmat, obslik, scaled=True, ret_loglik=False):
             scale[t] = 1.0 / torch.sum(trellis_prob[:,t])
             trellis_prob[:,t] *= scale[t]
         
-        if torch.sum(trellis_prob[:, t]) < 0.00001:
-            # re-scale to avoid numerical issues
-            trellis_prob[:, t] = trellis_prob[:, t] + 0.0001
-            if scaled:
-                scale[t] = 1.0 / torch.sum(trellis_prob[:, t])
-                trellis_prob[:, t] *= scale[t]
+        # if torch.sum(trellis_prob[:, t]) < 0.00001:
+        #     # re-scale to avoid numerical issues
+        #     trellis_prob[:, t] = trellis_prob[:, t] + 0.0001
+        #     if scaled:
+        #         scale[t] = 1.0 / torch.sum(trellis_prob[:, t])
+        #         trellis_prob[:, t] *= scale[t]
     
 
     path[-1] = trellis_prob[:,-1].argmax()
@@ -197,13 +197,8 @@ def trellis_encode(input_bits, scramble_bits=False):
     N = input_bits.size(0)
     N_OUT = N // 2 + 1
 
-    #if scramble_bits:
-        #tmp_i = input_bits.clone()
-        #input_bits = ((input_bits >> 3) | (input_bits << 5))
-        #tmp_o = ((input_bits << 3) | (input_bits >> 5))
-        
-        # print(tmp_i)
-        # print(tmp_o)
+    # if scramble_bits:
+    #     input_bits = ((input_bits >> 3) | (input_bits << 5))
 
 
     assert input_bits.dtype in [torch.uint8, torch.int8], "Input bits must be of type 8 bit type"
@@ -218,11 +213,15 @@ def trellis_encode(input_bits, scramble_bits=False):
             if (i & 0x0F) == (j >> 4):
                 transitions[i, j] = 1.0 / 16.0
 
-    states = torch.arange(256, dtype=torch.float32).unsqueeze(1)
+    states = torch.arange(256, dtype=torch.uint8)
     if scramble_bits:
+        states = ((states >> 3) | (states << 5)) & 0xFF
+        
         for i in range(256):
-            tmp = torch.tensor(i, dtype=torch.uint8)
-            states[i] = (((tmp << 3) | (tmp >> 5))).float().item()
+            if not i in states:
+                raise ValueError("Scrambling resulted in non-unique states")
+
+    states = states.unsqueeze(1).float()
 
     distance = (states - input_bits.unsqueeze(0).float())**2
     distance = torch.exp(-distance / (2 * (16.0 ** 2)))
@@ -233,7 +232,7 @@ def trellis_encode(input_bits, scramble_bits=False):
         prior=distance[:, 0],
         transmat=transitions,
         obslik=distance,
-        scaled=False,
+        scaled=True,
         ret_loglik=False
     )
     
@@ -285,16 +284,14 @@ def trellis_decode(encoded_bits, N, descramble_bits=False):
         res[-1] = (encoded_bits[-1] >> 4) | ((encoded_bits[-2] & 0x0F) << 4)
 
 
-    if descramble_bits:
-        #input_bits = ((input_bits >> 3) | (input_bits << 5))
-        #res = res^0xA7
-        res = ((res >> 5) | (res << 3))
-    
+    if descramble_bits:        
+        res = ((res >> 3) | (res << 5)) & 0xFF
+        
     return res
 
 
 if __name__ == "__main__":
-    # Example usage
+    print("-"*40)
     scrambled_bits = False
     input_bits = torch.tensor([0b11001100, 0b11000011, 0b00110011, 0b00111100], dtype=torch.uint8)
     expected_encoded = torch.tensor([0b11001100, 0b00110011, 0b11000000], dtype=torch.uint8)
@@ -307,7 +304,7 @@ if __name__ == "__main__":
     print("Decoded bits:", decoded)
     assert torch.equal(input_bits, decoded), "Decoded bits do not match original input bits!"
     
-    
+    print("-"*40)
     print("\nTesting with random input bits:")    
     input_bits = torch.tensor([90, 56, 32, 55, 128, 201, 253], dtype=torch.uint8)
     encoded = trellis_encode(input_bits, scramble_bits=scrambled_bits)
@@ -319,49 +316,25 @@ if __name__ == "__main__":
     print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
     
     
-    
-    # print("\nTesting with random input bits:")    
-    # input_bits = torch.tensor([90, 56, 32, 55, 128, 201, 253], dtype=torch.uint8)
-    # encoded = trellis_encode(input_bits, scramble_bits=True)
-    # print("Encoded bits:", encoded)
-
-    # decoded = trellis_decode(encoded, N=input_bits.size(0), descramble_bits=True)
-    # print("Input bits:", input_bits)
-    # print("Decoded bits:", decoded)
-    # print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
-    
-    
-    
-    # print("\nTesting with signed input bits:")    
-    # input_bits = torch.tensor([90, 56, 32, 55, 127, -12, -45, -60, -128], dtype=torch.int8)
-    # encoded = trellis_encode(input_bits, scramble_bits=scrambled_bits)
-    # print("Encoded bits:", encoded)
-
-    # decoded = trellis_decode(encoded, N=input_bits.size(0), descramble_bits=scrambled_bits)
-    # print("Input bits:", input_bits)
-    # decoded = decoded.to(torch.int8) #- 128
-    # print("Decoded bits:", decoded)
-    # print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
-    
-    # scrambled_bits = True
-    # print("\nTesting with scrambling enabled:")
-    # input_bits = torch.tensor([90, 56, 32, 55, 127, -12, -45, -60, -128], dtype=torch.int8)
-    # encoded = trellis_encode(input_bits, scramble_bits=scrambled_bits)
-    # print("Encoded bits:", encoded)
-
-    # decoded = trellis_decode(encoded, N=input_bits.size(0), descramble_bits=scrambled_bits)
-    # print("Input bits:", input_bits)
-    # decoded = decoded.to(torch.int32) - 128
-    # print("Decoded bits:", decoded)
-    # print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
-    
-    
     input_bits = torch.tensor([140,  92, 157, 124, 129, 152,  73, 148,  78, 170, 172, 112, 138,  62,
         106, 110,  64, 147,  86, 124,  98, 141,  44, 188, 176,  73, 134,  78,
          65,  90,  82, 169], dtype=torch.uint8)
 
 
+    print("-"*40)
     print("\nTesting with real data:")    
+    encoded = trellis_encode(input_bits, scramble_bits=scrambled_bits)
+    print("Encoded bits:", encoded)
+
+    decoded = trellis_decode(encoded, N=input_bits.size(0), descramble_bits=scrambled_bits)
+    print("Input bits:", input_bits)
+    print("Decoded bits:", decoded)
+    print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
+
+    
+    scrambled_bits = True
+    print("-"*40)
+    print("\nTesting with real data and scrambling enabled:")
     encoded = trellis_encode(input_bits, scramble_bits=scrambled_bits)
     print("Encoded bits:", encoded)
 
