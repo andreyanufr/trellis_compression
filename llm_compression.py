@@ -1,6 +1,7 @@
 import torch
 from transformers import AutoModelForCausalLM
 from trellis import trellis_encode, trellis_decode
+from trellis import trellis_encode_4_bit, trellis_decode_4_bit
 
 
 
@@ -91,32 +92,37 @@ def encode_decode_trellis(data, scramble_bits=True, with_group=False):
 
 
 
-model_id = "meta-llama/Llama-3.2-1B-Instruct"
+model_id = "meta-llama/Llama-3.1-8B-Instruct"
 
 model = AutoModelForCausalLM.from_pretrained(model_id, device_map='cpu')
 
 
-weight = model.model.layers[0].self_attn.q_proj.weight.data.clone()
-row = weight[0].clone()#[:16]
+#weight = model.model.layers[0].self_attn.q_proj.weight.data.clone()
+
+for n_layer in range(32):
+    weight = model.model.layers[n_layer].mlp.down_proj.weight.data.clone()
+    print(f"Layer {n_layer} down_proj weight compression results:")
+    for i in range(3):
+        row = weight[10 * i].clone()
 
 
-row_4bit = encode_decode_asym(row, num_bits=4)
-row_8bit = encode_decode_asym(row, num_bits=8)
+        row_4bit = encode_decode_asym(row, num_bits=4)
+        row_8bit = encode_decode_asym(row, num_bits=8)
 
-row_trellis = encode_decode_trellis(row, scramble_bits=False)
-row_trellis_scrambled = encode_decode_trellis(row, scramble_bits=True)
+        row_trellis = encode_decode_trellis(row, scramble_bits=False)
+        row_trellis_scrambled = encode_decode_trellis(row, scramble_bits=True)
 
-res = {
-    "original": row,
-    "4bit": row_4bit,
-    "8bit": row_8bit,
-    "trellis": row_trellis,
-    "trellis_scrambled": row_trellis_scrambled
-}
+        res = {
+            "8bit             ": row_8bit,
+            "4bit             ": row_4bit,
+            "trellis          ": row_trellis,
+            "trellis_scrambled": row_trellis_scrambled
+        }
 
-for key, value in res.items():
-    dispersion = torch.std(row.float() - value.float()).item()
-    print(f"{key}: Dispersion = {dispersion}")
+        print("_" * 80)
+        for key, value in res.items():
+            dispersion = torch.std(row.float() - value.float()).item()
+            print(f"\t{key}: Dispersion = {dispersion}")
 
 
 
