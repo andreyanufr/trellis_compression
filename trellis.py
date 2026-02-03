@@ -157,14 +157,14 @@ def viterbi_path(prior, transmat, obslik, scaled=True, ret_loglik=False):
         if scaled:
             scale[t] = 1.0 / torch.sum(trellis_prob[:,t])
             trellis_prob[:,t] *= scale[t]
-        
+
         # if torch.sum(trellis_prob[:, t]) < 0.00001:
         #     # re-scale to avoid numerical issues
         #     trellis_prob[:, t] = trellis_prob[:, t] + 0.0001
         #     if scaled:
         #         scale[t] = 1.0 / torch.sum(trellis_prob[:, t])
         #         trellis_prob[:, t] *= scale[t]
-    
+
 
     path[-1] = trellis_prob[:,-1].argmax()
     for t in range(num_obs-2, -1, -1):
@@ -186,8 +186,8 @@ def trellis_encode(input_bits, scramble_bits=False):
     Encodes input sequence of 8bit numbers using viterbi trellis encoding.
     One 8bit number have output edge to other if last 4 bits of current number
     are same as first 4 bits of next number. The output is a sequence of 8bit numbers this two times less elements.
-    
-    
+
+
     Args:
         input_bits (torch.Tensor): A tensor of shape (N) where N is the number of 8bit numbers.
         scramble_bits (bool): If True, scramble the input bits before encoding. Default is False.
@@ -205,9 +205,9 @@ def trellis_encode(input_bits, scramble_bits=False):
     if input_bits.dtype == torch.int8:
         input_bits = input_bits.to(torch.uint8)
 
-    
+
     transitions = torch.zeros((256, 256), dtype=torch.float32)
-    
+
     for i in range(256):
         for j in range(256):
             if (i & 0x0F) == (j >> 4):
@@ -216,7 +216,7 @@ def trellis_encode(input_bits, scramble_bits=False):
     states = torch.arange(256, dtype=torch.uint8)
     if scramble_bits:
         states = ((states >> 3) | (states << 5)) & 0xFF
-        
+
         for i in range(256):
             if not i in states:
                 raise ValueError("Scrambling resulted in non-unique states")
@@ -235,7 +235,7 @@ def trellis_encode(input_bits, scramble_bits=False):
         scaled=True,
         ret_loglik=False
     )
-    
+
     # path = viterbi_gpt(
     #     states=256,
     #     init=distance[:, 0],
@@ -243,7 +243,7 @@ def trellis_encode(input_bits, scramble_bits=False):
     #     emit=distance,
     #     obs=input_bits
     # )
-    
+
     encoded_bits = torch.zeros((N_OUT,), dtype=torch.uint8)
     encoded_bits[0] = path[0]
     for i in range(N_OUT):
@@ -263,8 +263,8 @@ def trellis_decode(encoded_bits, N, descramble_bits=False):
     One 8bit number have output edge to other if last 4 bits of current number
     are same as first 4 bits of next number. The input is a sequence of 8bit numbers
     this two times less elements.
-    
-    
+
+
     Args:
         encoded_bits (torch.Tensor): A tensor of shape (N // 2 + 1) where N is the number of 8bit numbers.
         N (int): The number of output 8bit numbers after decoding.
@@ -279,14 +279,14 @@ def trellis_decode(encoded_bits, N, descramble_bits=False):
         res[i * 2] = encoded_bits[i]
         if i > 0:
             res[i * 2 - 1] = ((encoded_bits[i - 1] & 0x0F) << 4) | (encoded_bits[i] >> 4)
-    
+
     if N % 2 == 0:
         res[-1] = (encoded_bits[-1] >> 4) | ((encoded_bits[-2] & 0x0F) << 4)
 
 
-    if descramble_bits:        
+    if descramble_bits:
         res = ((res >> 3) | (res << 5)) & 0xFF
-        
+
     return res
 
 
@@ -296,8 +296,8 @@ def trellis_encode_4_bit(input_bits, scramble_bits=False):
     Encodes input sequence of 4bit numbers using viterbi trellis encoding.
     One 4bit number have output edge to other if last 2 bits of current number
     are same as first 2 bits of next number. The output is a sequence of 8bit numbers this two times less elements.
-    
-    
+
+
     Args:
         input_bits (torch.Tensor): A tensor of shape (N) where N is the number of 4bit numbers.
         scramble_bits (bool): If True, scramble the input bits before encoding. Default is False.
@@ -315,9 +315,9 @@ def trellis_encode_4_bit(input_bits, scramble_bits=False):
     if input_bits.dtype == torch.int8:
         input_bits = input_bits.to(torch.uint8)
 
-    
+
     transitions = torch.zeros((16, 16), dtype=torch.float32)
-    
+
     for i in range(16):
         for j in range(16):
             if (i & 0x03) == (j >> 2):
@@ -326,7 +326,7 @@ def trellis_encode_4_bit(input_bits, scramble_bits=False):
     states = torch.arange(16, dtype=torch.uint8)
     if scramble_bits:
         states = ((states >> 1) | (states << 3)) & 0b00001111
-        
+
         for i in range(16):
             if not i in states:
                 raise ValueError("Scrambling resulted in non-unique states")
@@ -345,7 +345,7 @@ def trellis_encode_4_bit(input_bits, scramble_bits=False):
         scaled=True,
         ret_loglik=False
     )
-    
+
     # path = viterbi_gpt(
     #     states=256,
     #     init=distance[:, 0],
@@ -353,7 +353,7 @@ def trellis_encode_4_bit(input_bits, scramble_bits=False):
     #     emit=distance,
     #     obs=input_bits
     # )
-    
+
     encoded_bits = torch.zeros((N_OUT,), dtype=torch.uint8)
     encoded_bits[0] = path[0]
     for i in range(N_OUT):
@@ -373,8 +373,8 @@ def trellis_decode_4_bit(encoded_bits, N, descramble_bits=False):
     One 8bit number have output edge to other if last 4 bits of current number
     are same as first 4 bits of next number. The input is a sequence of 8bit numbers
     this two times less elements.
-    
-    
+
+
     Args:
         encoded_bits (torch.Tensor): A tensor of shape (N // 2 + 1) where N is the number of 8bit numbers.
         N (int): The number of output 8bit numbers after decoding.
@@ -389,14 +389,14 @@ def trellis_decode_4_bit(encoded_bits, N, descramble_bits=False):
         res[i * 2] = encoded_bits[i]
         if i > 0:
             res[i * 2 - 1] = ((encoded_bits[i - 1] & 0x03) << 2) | (encoded_bits[i] >> 2)
-    
+
     if N % 2 == 0:
         res[-1] = encoded_bits[-1]  #((encoded_bits[-1] >> 2) | ((encoded_bits[-2] & 0x03) << 2))
 
 
-    if descramble_bits:        
+    if descramble_bits:
         res = ((res >> 1) | (res << 3)) & 0b00001111
-        
+
     return res
 
 
@@ -413,9 +413,9 @@ def test_8bit():
     decoded = trellis_decode(encoded, N=input_bits.size(0), descramble_bits=scrambled_bits)
     print("Decoded bits:", decoded)
     assert torch.equal(input_bits, decoded), "Decoded bits do not match original input bits!"
-    
+
     print("-"*40)
-    print("\nTesting with random input bits:")    
+    print("\nTesting with random input bits:")
     input_bits = torch.tensor([90, 56, 32, 55, 128, 201, 253], dtype=torch.uint8)
     encoded = trellis_encode(input_bits, scramble_bits=scrambled_bits)
     print("Encoded bits:", encoded)
@@ -424,15 +424,15 @@ def test_8bit():
     print("Input bits:", input_bits)
     print("Decoded bits:", decoded)
     print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
-    
-    
+
+
     input_bits = torch.tensor([140,  92, 157, 124, 129, 152,  73, 148,  78, 170, 172, 112, 138,  62,
         106, 110,  64, 147,  86, 124,  98, 141,  44, 188, 176,  73, 134,  78,
          65,  90,  82, 169], dtype=torch.uint8)
 
 
     print("-"*40)
-    print("\nTesting with real data:")    
+    print("\nTesting with real data:")
     encoded = trellis_encode(input_bits, scramble_bits=scrambled_bits)
     print("Encoded bits:", encoded)
 
@@ -441,7 +441,7 @@ def test_8bit():
     print("Decoded bits:", decoded)
     print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
 
-    
+
     scrambled_bits = True
     print("-"*40)
     print("\nTesting with real data and scrambling enabled:")
@@ -462,7 +462,7 @@ def test_4bits():
 
 
     print("-"*40)
-    print("\nTesting with real data:")    
+    print("\nTesting with real data:")
     encoded = trellis_encode_4_bit(input_bits, scramble_bits=scrambled_bits)
     print("Encoded bits:", encoded)
 
@@ -471,7 +471,7 @@ def test_4bits():
     print("Decoded bits:", decoded)
     print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
 
-    
+
     scrambled_bits = True
     print("-"*40)
     print("\nTesting with real data and scrambling enabled:")
