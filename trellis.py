@@ -236,14 +236,6 @@ def trellis_encode(input_bits, scramble_bits=False):
         ret_loglik=False
     )
 
-    # path = viterbi_gpt(
-    #     states=256,
-    #     init=distance[:, 0],
-    #     trans=transitions,
-    #     emit=distance,
-    #     obs=input_bits
-    # )
-
     encoded_bits = torch.zeros((N_OUT,), dtype=torch.uint8)
     encoded_bits[0] = path[0]
     for i in range(N_OUT):
@@ -335,6 +327,9 @@ def trellis_encode_4_bit(input_bits, scramble_bits=False):
 
     distance = (states - input_bits.unsqueeze(0).float())**2
     distance = torch.exp(-distance / (2 * (4.0 ** 2)))
+
+    distance = distance**2 # sharpening the distribution to make it more deterministic, since we have less states and more collisions
+
     distance = distance / distance.sum(dim=0, keepdim=True)
 
 
@@ -398,6 +393,240 @@ def trellis_decode_4_bit(encoded_bits, N, descramble_bits=False):
         res = ((res >> 1) | (res << 3)) & 0b00001111
 
     return res
+
+
+def pack(input_data, shift):
+    """
+    Pack uint8 tensor by combining bits from consecutive elements.
+
+    Args:
+        input_data (torch.Tensor): Input tensor of type torch.uint8
+        shift (int): Number of bits to share between consecutive elements (1-7)
+
+    Returns:
+        torch.Tensor: Packed tensor (flattened, smaller than input)
+
+    Logic:
+        Elements at indices i and i+1 share 'shift' bits.
+        The lower 'shift' bits of element i equal the upper 'shift' bits of element i+1.
+        We store: all 8 bits of element 0, then only the lower (8-shift) bits of each
+        subsequent element, since their upper shift bits are redundant.
+    """
+    if shift <= 0 or shift >= 8:
+        raise ValueError("shift must be between 1 and 7")
+    assert input_data.dtype == torch.uint8, "Input data must be of type torch.uint8"
+
+    # Flatten input if not already flat
+    input_flat = input_data.flatten()
+    n = input_flat.size(0)
+
+    if n == 0:
+        return torch.tensor([], dtype=torch.uint8)
+
+    if n == 1:
+        return input_flat.clone()
+
+    # Calculate total bits needed: 8 + (n-1)*(8-shift)
+    total_bits = shift + (n-1)*(8-shift)
+    num_bytes = (total_bits + 7) // 8  # Round up
+
+    # Create a bit buffer
+    packed = torch.zeros(num_bytes, dtype=torch.uint8)
+
+    if 8 - shift == 2:
+        for i in range(num_bytes):
+            if i * 4  < n:
+                packed[i] = input_flat[i * 4]
+        if n > 0 and (n - 1) % 4 != 0:
+            n_bits  = ((n - 1) % 4) * 2
+            packed[-1] = input_flat[-1] << (8 - n_bits)
+
+        return packed
+
+    bit_pos = 0  # Current bit position in the output
+
+    # Store all 8 bits of first element
+    packed[0] = input_flat[0]
+
+    # Store lower (8-shift) bits of remaining elements
+    for i in range(1, n):
+        elem = input_flat[i].item()
+        for bit_idx in range(8 - shift):  # Only lower (8-shift) bits
+            byte_idx = bit_pos // 8
+            bit_in_byte = bit_pos % 8
+            bit_value = (elem >> bit_idx) & 1
+            packed[byte_idx] = packed[byte_idx] | (bit_value << bit_in_byte)
+            bit_pos += 1
+
+    return packed
+
+
+def unpack(packed_data, shift, original_size):
+    """
+    Unpack a tensor that was packed using the pack function.
+
+    Args:
+        packed_data (torch.Tensor): Packed tensor of type torch.uint8
+        shift (int): Number of bits that were shared (same as used in pack)
+        original_size (int): Original number of elements before packing
+
+    Returns:
+        torch.Tensor: Unpacked tensor of shape (original_size,) with dtype torch.uint8
+    """
+    if shift <= 0 or shift >= 8:
+        raise ValueError("shift must be between 1 and 7")
+
+    if original_size == 0:
+        return torch.tensor([], dtype=torch.uint8)
+
+
+    if shift == 6:
+        res = torch.zeros(original_size, dtype=torch.uint8)
+        res_i = 0
+        shift_i = 0
+        while res_i < original_size:
+            idx = shift_i // 8
+            l_bits = shift_i - idx * 8
+            r_bits = 8 - l_bits
+            if l_bits == 0:
+                res[res_i] = packed_data[idx]
+            else:
+                res[res_i] = ((packed_data[idx] << l_bits) & 0xFF) | (packed_data[idx + 1] >> r_bits)
+            res_i += 1
+            shift_i += 2
+        return res
+
+
+
+    packed_flat = packed_data.flatten()
+    n = original_size
+
+    if n == 1:
+        # First element is stored in first 8 bits
+        result = torch.zeros(1, dtype=torch.uint8)
+        for bit_idx in range(8):
+            byte_idx = bit_idx // 8
+            bit_in_byte = bit_idx % 8
+            bit_value = (packed_flat[byte_idx].item() >> bit_in_byte) & 1
+            result[0] = result[0] | (bit_value << bit_idx)
+        return result
+
+    unpacked = torch.zeros(n, dtype=torch.uint8)
+    bit_pos = 0
+
+    # Read all 8 bits of first element
+    for bit_idx in range(8):
+        byte_idx = bit_pos // 8
+        bit_in_byte = bit_pos % 8
+        bit_value = (packed_flat[byte_idx].item() >> bit_in_byte) & 1
+        unpacked[0] = unpacked[0] | (bit_value << bit_idx)
+        bit_pos += 1
+
+    # Read remaining elements
+    for i in range(1, n):
+        # Read lower (8-shift) bits
+        for bit_idx in range(8 - shift):
+            byte_idx = bit_pos // 8
+            bit_in_byte = bit_pos % 8
+            bit_value = (packed_flat[byte_idx].item() >> bit_in_byte) & 1
+            unpacked[i] = unpacked[i] | (bit_value << bit_idx)
+            bit_pos += 1
+
+        # Upper shift bits come from lower shift bits of previous element
+        prev_lower_bits = unpacked[i - 1].item() & ((1 << shift) - 1)
+        unpacked[i] = unpacked[i] | (prev_lower_bits << (8 - shift))
+
+    return unpacked
+
+
+def trellis_encode_bit_shift(input_bits, scramble_bits=False, k=2):
+    """
+    Encodes input sequence of 8bit numbers using viterbi trellis encoding.
+    One 8bit number have output edge to other if last 4 bits of current number
+    are same as first 4 bits of next number. The output is a sequence of 8bit numbers this two times less elements.
+
+
+    Args:
+        input_bits (torch.Tensor): A tensor of shape (N) where N is the number of 8bit numbers.
+        scramble_bits (bool): If True, scramble the input bits before encoding. Default is False.
+    Returns:
+        torch.Tensor: A tensor of shape (N / 2 + 1).
+    """
+    N = input_bits.size(0)
+    N_OUT = N // 2 + 1
+
+    # if scramble_bits:
+    #     input_bits = ((input_bits >> 3) | (input_bits << 5))
+
+
+    assert input_bits.dtype in [torch.uint8, torch.int8], "Input bits must be of type 8 bit type"
+    if input_bits.dtype == torch.int8:
+        input_bits = input_bits.to(torch.uint8)
+
+
+    transitions = torch.zeros((256, 256), dtype=torch.float32)
+
+    for i in range(256):
+        shared_bits = i & (0b11111111 >> k)
+        mask = (0b11111111 << k) & 0xFF
+        for j in range(256):
+            if shared_bits == (j & mask) >> k:
+                transitions[i, j] = 1.0 / 2**(8 - k)
+                # if i == 204:
+                #     print(bin(i), bin(j), bin(shared_bits), bin(mask), transitions[i, j])
+
+    states = torch.arange(256, dtype=torch.uint8)
+    if scramble_bits:
+        states = ((states >> 3) | (states << 5)) & 0xFF
+
+        for i in range(256):
+            if not i in states:
+                raise ValueError("Scrambling resulted in non-unique states")
+
+    states = states.unsqueeze(1).float()
+
+    distance = (states - input_bits.unsqueeze(0).float())**2
+    distance = torch.exp(-distance / (2 * (16.0 ** 2)))
+    distance = distance / distance.sum(dim=0, keepdim=True)
+
+
+
+    path = viterbi_path(
+        prior=distance[:, 0],
+        transmat=transitions,
+        obslik=distance,
+        scaled=True,
+        ret_loglik=False
+    )
+
+    encoded_bits = pack(path.to(torch.uint8), shift=8 - k)
+
+    return encoded_bits
+
+
+def trellis_decode_bit_shift(encoded_bits, N, descramble_bits=False, k=2):
+    """
+    Decodes input sequence of 8bit numbers using viterbi trellis decoding.
+    One 8bit number have output edge to other if last 4 bits of current number
+    are same as first 4 bits of next number. The input is a sequence of 8bit numbers
+    this two times less elements.
+
+
+    Args:
+        encoded_bits (torch.Tensor): A tensor of shape (N // 2 + 1) where N is the number of 8bit numbers.
+        N (int): The number of output 8bit numbers after decoding.
+        descramble_bits (bool): If True, descramble the output bits after decoding. Default is False.
+    Returns:
+        torch.Tensor: A tensor of shape (N).
+    """
+    res = unpack(encoded_bits, shift=8 - k, original_size=N)
+
+    if descramble_bits:
+        res = ((res >> 3) | (res << 5)) & 0xFF
+
+    return res
+
+
 
 
 def test_8bit():
@@ -483,7 +712,100 @@ def test_4bits():
     print("Decoded bits:", decoded)
     print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
 
+    input_bits = torch.tensor([ 5, 10,  7, 10,  7, 10,  7,  4,  7,  7, 11,  8,  9,  8,  8,  7,  6,  9,
+         6,  7, 10,  9, 11,  5,  6,  4,  9,  8, 10, 10,  9,  8],
+       dtype=torch.int8)
+
+    scrambled_bits = False
+    print("-"*40)
+    print("\nTesting with real data:")
+    encoded = trellis_encode_4_bit(input_bits, scramble_bits=scrambled_bits)
+    print("Encoded bits:", encoded)
+
+    decoded = trellis_decode_4_bit(encoded, N=input_bits.size(0), descramble_bits=scrambled_bits)
+    print("Input bits:", input_bits)
+    print("Decoded bits:", decoded)
+    print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
+
+
+    scrambled_bits = True
+    print("-"*40)
+    print("\nTesting with real data and scrambling enabled:")
+    encoded = trellis_encode_4_bit(input_bits, scramble_bits=scrambled_bits)
+    print("Encoded bits:", encoded)
+
+    decoded = trellis_decode_4_bit(encoded, N=input_bits.size(0), descramble_bits=scrambled_bits)
+    print("Input bits:", input_bits)
+    print("Decoded bits:", decoded)
+    print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
+
+
+
+def test_8bit_to_2bit():
+    print("-"*40)
+    scrambled_bits = False
+    # input_bits = torch.tensor([0b11001100, 0b11000011, 0b00110011, 0b00111100], dtype=torch.uint8)
+    # expected_encoded = torch.tensor([0b11001100, 0b00110011, 0b11000000], dtype=torch.uint8)
+
+    # encoded = trellis_encode_bit_shift(input_bits, scramble_bits=scrambled_bits, k=4)
+    # print("Encoded bits:", encoded)
+    # assert torch.equal(encoded, expected_encoded), "Encoded bits do not match expected output!"
+
+    # decoded = trellis_decode_bit_shift(encoded, N=input_bits.size(0), descramble_bits=scrambled_bits, k=4)
+    # print("Decoded bits:", decoded)
+    # assert torch.equal(input_bits, decoded), "Decoded bits do not match original input bits!"
+
+
+    input_bits = torch.tensor([0b11101100,
+                               0b10110011,
+                               0b11001111,
+                               0b00111100], dtype=torch.uint8)
+
+
+# 11101100
+#   10110011,
+#     11001111,
+#       00111100
+
+        # 11101100
+        #   10110011,
+        #     11001111,
+        #       00111100
+
+# 8 * k + k = 20
+
+    expected_encoded = torch.tensor([0b11101100, 0b11110000], dtype=torch.uint8)
+    encoded = trellis_encode_bit_shift(input_bits, scramble_bits=scrambled_bits, k=2)
+    print("Encoded bits:", encoded)
+    decoded = trellis_decode_bit_shift(encoded, N=input_bits.size(0), descramble_bits=scrambled_bits, k=2)
+    print("Decoded bits:", decoded)
+    assert torch.equal(input_bits, decoded), "Decoded bits do not match original input bits!"
+
+    print("-"*40)
+    print("\nTesting with random input bits:")
+    input_bits = torch.tensor([90, 56, 32, 55, 128, 201, 253], dtype=torch.uint8)
+    encoded = trellis_encode_bit_shift(input_bits, scramble_bits=scrambled_bits, k=2)
+    print("Encoded bits:", encoded)
+
+    decoded = trellis_decode_bit_shift(encoded, N=input_bits.size(0), descramble_bits=scrambled_bits, k=2)
+    print("Input bits:", input_bits)
+    print("Decoded bits:", decoded)
+    print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
+
+    scrambled_bits = True
+    print("-"*40)
+    print("\nTesting with random input bits:")
+    input_bits = torch.tensor([90, 56, 32, 55, 128, 201, 253], dtype=torch.uint8)
+    encoded = trellis_encode_bit_shift(input_bits, scramble_bits=scrambled_bits, k=2)
+    print("Encoded bits:", encoded)
+
+    decoded = trellis_decode_bit_shift(encoded, N=input_bits.size(0), descramble_bits=scrambled_bits, k=2)
+    print("Input bits:", input_bits)
+    print("Decoded bits:", decoded)
+    print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
+
 
 if __name__ == "__main__":
     #test_8bit()
-    test_4bits()
+    #test_4bits()
+    test_8bit_to_2bit()
