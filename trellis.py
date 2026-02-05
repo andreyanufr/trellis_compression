@@ -767,6 +767,9 @@ def test_8bit_to_2bit():
 #     11001111,
 #       00111100
 
+#11101100111100
+
+
         # 11101100
         #   10110011,
         #     11001111,
@@ -803,7 +806,32 @@ def test_8bit_to_2bit():
     print("Input bits:", input_bits)
     print("Decoded bits:", decoded)
     print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
+    
+    
+    scrambled_bits = False
+    print("-"*40)
+    print("\nTesting with random input bits:")
+    input_bits = torch.tensor([95]*32, dtype=torch.uint8)
+    encoded = trellis_encode_bit_shift(input_bits, scramble_bits=scrambled_bits, k=2)
+    print("Encoded bits:", encoded)
 
+    decoded = trellis_decode_bit_shift(encoded, N=input_bits.size(0), descramble_bits=scrambled_bits, k=2)
+    print("Input bits:", input_bits)
+    print("Decoded bits:", decoded)
+    print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
+
+
+    scrambled_bits = True
+    print("-"*40)
+    print("\nTesting with random input bits:")
+    input_bits = torch.tensor([95]*32, dtype=torch.uint8)
+    encoded = trellis_encode_bit_shift(input_bits, scramble_bits=scrambled_bits, k=2)
+    print("Encoded bits:", encoded)
+
+    decoded = trellis_decode_bit_shift(encoded, N=input_bits.size(0), descramble_bits=scrambled_bits, k=2)
+    print("Input bits:", input_bits)
+    print("Decoded bits:", decoded)
+    print("Dispersion:", torch.std(input_bits.float() - decoded.float()).item())
 
 if __name__ == "__main__":
     #test_8bit()
