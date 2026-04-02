@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
+from data_packing import pack_with_overlap, unpack_with_overlap
 
 def viterbi_gpt(states, init, trans, emit, obs):
     """
@@ -136,24 +136,27 @@ def viterbi_path(prior, transmat, obslik, scaled=True, ret_loglik=False):
     num_obs = obslik.shape[1] # number of observations (not observation *states*)
 
     # trellis_prob[i,t] := Pr((best sequence of length t-1 goes to state i), Z[1:(t+1)])
-    trellis_prob = torch.zeros((num_hid,num_obs))
+    trellis_prob = torch.zeros((num_hid,num_obs)).to(obslik.device) # same dtype and device as obslik
     # trellis_state[i,t] := best predecessor state given that we ended up in state i at t
-    trellis_state = torch.zeros((num_hid,num_obs), dtype=torch.int64) # int because its elements will be used as indicies
-    path = torch.zeros(num_obs, dtype=torch.int64) # int because its elements will be used as indicies
+    trellis_state = torch.zeros((num_hid,num_obs), dtype=torch.int64).to(obslik.device) # int because its elements will be used as indicies
+    path = torch.zeros(num_obs, dtype=torch.int64).to(obslik.device) # int because its elements will be used as indicies
 
     trellis_prob[:,0] = prior * obslik[:,0] # element-wise mult
     if scaled:
-        scale = torch.ones(num_obs) # only instantiated if necessary to save memory
+        scale = torch.ones(num_obs).to(obslik.device) # only instantiated if necessary to save memory
         scale[0] = 1.0 / torch.sum(trellis_prob[:,0])
         trellis_prob[:,0] *= scale[0]
 
     trellis_state[:,0] = 0 # arbitrary value since t == 0 has no predecessor
     for t in range(1, num_obs):
-        for j in range(num_hid):
-            trans_probs = trellis_prob[:,t-1] * transmat[:,j] # element-wise mult
-            trellis_state[j,t] = trans_probs.argmax()
-            trellis_prob[j,t] = trans_probs[trellis_state[j,t]] # max of trans_probs
-            trellis_prob[j,t] *= obslik[j,t]
+        # Vectorized computation: for each state j, compute trans_probs from all previous states
+        # trans_probs shape: (num_hid, num_hid) where [:, j] contains probs of transitioning to state j
+        trans_probs = trellis_prob[:,t-1].unsqueeze(1) * transmat  # (num_hid, 1) * (num_hid, num_hid)
+        
+        # For each target state j, find best previous state and max probability
+        trellis_prob[:,t], trellis_state[:,t] = torch.max(trans_probs, dim=0)
+        trellis_prob[:,t] *= obslik[:,t]
+        
         if scaled:
             scale[t] = 1.0 / torch.sum(trellis_prob[:,t])
             trellis_prob[:,t] *= scale[t]
@@ -179,6 +182,56 @@ def viterbi_path(prior, transmat, obslik, scaled=True, ret_loglik=False):
             p = trellis_prob[path[-1],-1]
             loglik = torch.log(p)
         return path, loglik
+
+
+def viterbi_uint8(data: torch.Tensor, transmat: torch.Tensor):
+    """
+    data:      [T] uint8 tensor (values 0..255)
+    transmat:  [256, 256] float tensor, probabilities
+
+    Returns:
+        path: [T] uint8 tensor (most likely state sequence)
+    """
+
+    T = data.shape[0]
+    N = 256
+    device = data.device
+
+    # Convert to log space
+    log_trans = torch.log(transmat + 1e-20)  # avoid log(0)
+
+    # DP table (only keep current + backpointers)
+    delta = torch.full((T, N), -1e30, device=device)
+    psi   = torch.zeros((T, N), dtype=torch.uint8, device=device)
+
+    # --- Initialization ---
+    # If emission is identity: state == data[t]
+    # then we strongly bias that state
+    delta[0] = -1e30
+    delta[0, data[0]] = 0.0
+
+    # --- Forward pass ---
+    for t in range(1, T):
+        prev = delta[t-1].unsqueeze(1)        # [256, 1]
+        scores = prev + log_trans             # [256, 256]
+
+        best_scores, best_states = torch.max(scores, dim=0)
+
+        # constrain to observed value (optional, depends on model)
+        delta[t] = -1e30
+        delta[t, data[t]] = best_scores[data[t]]
+
+        psi[t] = best_states.to(torch.uint8)
+
+    # --- Backtracking ---
+    path = torch.zeros(T, dtype=torch.uint8, device=device)
+
+    path[T-1] = torch.argmax(delta[T-1]).to(torch.uint8)
+
+    for t in range(T-2, -1, -1):
+        path[t] = psi[t+1, path[t+1]]
+
+    return path
 
 
 def trellis_encode(input_bits, scramble_bits=False):
@@ -564,7 +617,7 @@ def trellis_encode_bit_shift(input_bits, scramble_bits=False, k=2):
         input_bits = input_bits.to(torch.uint8)
 
 
-    transitions = torch.zeros((256, 256), dtype=torch.float32)
+    transitions = torch.zeros((256, 256), dtype=torch.float32).to(input_bits.device)
 
     for i in range(256):
         shared_bits = i & (0b11111111 >> k)
@@ -583,7 +636,7 @@ def trellis_encode_bit_shift(input_bits, scramble_bits=False, k=2):
             if not i in states:
                 raise ValueError("Scrambling resulted in non-unique states")
 
-    states = states.unsqueeze(1).float()
+    states = states.unsqueeze(1).float().to(input_bits.device)
 
     distance = (states - input_bits.unsqueeze(0).float())**2
     distance = torch.exp(-distance / (2 * (16.0 ** 2)))
@@ -598,8 +651,11 @@ def trellis_encode_bit_shift(input_bits, scramble_bits=False, k=2):
         scaled=True,
         ret_loglik=False
     )
+    
+    #path = viterbi_uint8(input_bits, transitions)
 
-    encoded_bits = pack(path.to(torch.uint8), shift=8 - k)
+    #encoded_bits = pack(path.to(torch.uint8), shift=8 - k)
+    encoded_bits = pack_with_overlap(path.to(torch.uint8), overlap=8 - k)
 
     return encoded_bits
 
@@ -619,7 +675,8 @@ def trellis_decode_bit_shift(encoded_bits, N, descramble_bits=False, k=2):
     Returns:
         torch.Tensor: A tensor of shape (N).
     """
-    res = unpack(encoded_bits, shift=8 - k, original_size=N)
+    #res = unpack(encoded_bits, shift=8 - k, original_size=N)
+    res = unpack_with_overlap(encoded_bits, overlap=8 - k, num_elements=N)
 
     if descramble_bits:
         res = ((res >> 3) | (res << 5)) & 0xFF

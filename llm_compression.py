@@ -100,11 +100,25 @@ def encode_decode_trellis(data, scramble_bits=True, with_group=False, num_bits=8
     return decompressed_data
 
 
-def encode_decode_trellis_8_to_2(data, scramble_bits=True):
+def encode_decode_trellis_8_to_2(data, scramble_bits=True, device=None):
     _, compressed_data, scale, zero_point = encode_decode_asym(data, num_bits=8, return_encoded_data=True)
 
-    encoded_data = trellis_encode_bit_shift(compressed_data, scramble_bits=scramble_bits, k=2)
-    decoded_data = trellis_decode_bit_shift(encoded_data, N=compressed_data.size(0), descramble_bits=scramble_bits, k=2)
+    if len(compressed_data.shape) == 2:
+
+        n_chunks = compressed_data.size(0)
+        decoded_data = []
+
+        if device is not None:
+            compressed_data = compressed_data.to(device)
+        for i in range(n_chunks):
+            chunk = compressed_data[i, :]
+            encoded_chunk = trellis_encode_bit_shift(chunk, scramble_bits=scramble_bits, k=2)
+            decoded_chunk = trellis_decode_bit_shift(encoded_chunk, N=chunk.size(0), descramble_bits=scramble_bits, k=2)
+            decoded_data.append(decoded_chunk)
+        decoded_data = torch.cat(decoded_data, dim=0).to(compressed_data.device)
+    else:
+        encoded_data = trellis_encode_bit_shift(compressed_data, scramble_bits=scramble_bits, k=2)
+        decoded_data = trellis_decode_bit_shift(encoded_data, N=compressed_data.size(0), descramble_bits=scramble_bits, k=2)
 
 
     #print(f"Asymmetric trellis {8}-bit: {decoded_data}")
@@ -120,57 +134,57 @@ model = AutoModelForCausalLM.from_pretrained(model_id, device_map='cpu')
 
 
 #weight = model.model.layers[0].self_attn.q_proj.weight.data.clone()
+if __name__ == "__main__":
+    for n_layer in range(10):
+        weight = model.model.layers[n_layer].mlp.down_proj.weight.data.clone()
+        print(f"Layer {n_layer} down_proj weight compression results:")
+        for i in range(3):
+            row = weight[10 * i].clone()[:128]
 
-for n_layer in range(10):
-    weight = model.model.layers[n_layer].mlp.down_proj.weight.data.clone()
-    print(f"Layer {n_layer} down_proj weight compression results:")
-    for i in range(3):
-        row = weight[10 * i].clone()[:128]
-
-        if n_layer == 0 and i == 0:
-            row = torch.tensor([0.0378418 ,  0.08740234, -0.02368164, -0.10058594,  0.00723267,
-                                -0.10302734, -0.01556396,  0.03039551, -0.0027771 ,  0.01416016,
-                                    0.02893066, -0.01483154, -0.55078125, -0.0007515 , -0.02954102,
-                                    0.04394531,  0.01031494,  0.012146  , -0.02282715,  0.03564453,
-                                    0.05664062,  0.03686523,  0.03930664, -0.02905273,  0.04272461,
-                                    0.05444336,  0.06103516, -0.03662109,  0.02807617,  0.01757812,
-                                -0.04052734, -0.01647949], dtype=torch.float32)
-
-
-        row_trellis_8_to_2 = encode_decode_trellis_8_to_2(row, scramble_bits=False)
-        row_trellis_8_to_2_scrambled = encode_decode_trellis_8_to_2(row, scramble_bits=True)
-
-        row_2bit = encode_decode_asym(row, num_bits=2)
-        row_4bit = encode_decode_asym(row, num_bits=4)
-        row_8bit = encode_decode_asym(row, num_bits=8)
-
-        row_trellis = encode_decode_trellis(row, with_group=True, scramble_bits=False)
-        row_trellis_scrambled = encode_decode_trellis(row, scramble_bits=True)
+            if n_layer == 0 and i == 0:
+                row = torch.tensor([0.0378418 ,  0.08740234, -0.02368164, -0.10058594,  0.00723267,
+                                    -0.10302734, -0.01556396,  0.03039551, -0.0027771 ,  0.01416016,
+                                        0.02893066, -0.01483154, -0.55078125, -0.0007515 , -0.02954102,
+                                        0.04394531,  0.01031494,  0.012146  , -0.02282715,  0.03564453,
+                                        0.05664062,  0.03686523,  0.03930664, -0.02905273,  0.04272461,
+                                        0.05444336,  0.06103516, -0.03662109,  0.02807617,  0.01757812,
+                                    -0.04052734, -0.01647949], dtype=torch.float32)
 
 
-        row_trellis_4_bit = encode_decode_trellis(row, scramble_bits=False, num_bits=4)
-        row_trellis_scrambled_4_bit = encode_decode_trellis(row, scramble_bits=True, num_bits=4)
+            row_trellis_8_to_2 = encode_decode_trellis_8_to_2(row, scramble_bits=False)
+            row_trellis_8_to_2_scrambled = encode_decode_trellis_8_to_2(row, scramble_bits=True)
+
+            row_2bit = encode_decode_asym(row, num_bits=2)
+            row_4bit = encode_decode_asym(row, num_bits=4)
+            row_8bit = encode_decode_asym(row, num_bits=8)
+
+            row_trellis = encode_decode_trellis(row, with_group=True, scramble_bits=False)
+            row_trellis_scrambled = encode_decode_trellis(row, scramble_bits=True)
 
 
-        res = {
-            "8bit             ": row_8bit,
-            "4bit             ": row_4bit,
-            "trellis_8_to_4   ": row_trellis,
-            "trellis_sc_8_to_4": row_trellis_scrambled,
-            "2bit             ": row_2bit,
-            "trellis_4_to_2   ": row_trellis_4_bit,
-            "trellis_sc_4_to_2": row_trellis_scrambled_4_bit,
-            "trellis_8_to_2   ": row_trellis_8_to_2,
-            "trellis_sc_8_to_2": row_trellis_8_to_2_scrambled
-        }
+            row_trellis_4_bit = encode_decode_trellis(row, scramble_bits=False, num_bits=4)
+            row_trellis_scrambled_4_bit = encode_decode_trellis(row, scramble_bits=True, num_bits=4)
 
-        print("_" * 80)
-        for key, value in res.items():
-            dispersion = torch.std(row.float() - value.float()).item()
-            print(f"\t{key}: Dispersion = {dispersion}")
-        for key, value in res.items():
-            relative_error = torch.norm(row.float() - value.float()) / torch.norm(row.float())
-            print(f"\t{key}: Relative Error = {relative_error:.6f}")
+
+            res = {
+                "8bit             ": row_8bit,
+                "4bit             ": row_4bit,
+                "trellis_8_to_4   ": row_trellis,
+                "trellis_sc_8_to_4": row_trellis_scrambled,
+                "2bit             ": row_2bit,
+                "trellis_4_to_2   ": row_trellis_4_bit,
+                "trellis_sc_4_to_2": row_trellis_scrambled_4_bit,
+                "trellis_8_to_2   ": row_trellis_8_to_2,
+                "trellis_sc_8_to_2": row_trellis_8_to_2_scrambled
+            }
+
+            print("_" * 80)
+            for key, value in res.items():
+                dispersion = torch.std(row.float() - value.float()).item()
+                print(f"\t{key}: Dispersion = {dispersion}")
+            for key, value in res.items():
+                relative_error = torch.norm(row.float() - value.float()) / torch.norm(row.float())
+                print(f"\t{key}: Relative Error = {relative_error:.6f}")
 
 
 
